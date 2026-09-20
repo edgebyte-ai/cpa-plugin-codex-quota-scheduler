@@ -39,6 +39,8 @@ const (
 )
 
 type AccountView struct {
+	resetAwareInput      resetAwareInput
+	resetAwareRank       resetAwareKey
 	ID                   string
 	AuthIndex            string
 	Instance             AuthInstanceID
@@ -122,6 +124,7 @@ func selectAccountSkipping(snapshot SchedulerSnapshot, candidates []Candidate, n
 	}
 	for _, class := range []AvailabilityClass{Preferred, Opportunistic} {
 		accounts := byClass[class]
+		accounts = applyResetAwarePolicy(accounts, now)
 		sort.Slice(accounts, func(i, j int) bool { return accountViewLess(accounts[i], accounts[j], snapshot.MonthlyMode) })
 		if len(accounts) > 0 {
 			result := SelectionResult{AuthID: accounts[0].ID, Instance: accounts[0].Instance, Class: class, Trial: class == Opportunistic, Reason: "selected", Ordered: accounts}
@@ -146,6 +149,9 @@ func accountViewLess(a, b AccountView, mode MonthlyMode) bool {
 	}
 	if mode == MonthlyModePriority && a.Family != b.Family {
 		return a.Family == AccountFamilyMonthly
+	}
+	if less, decided := resetAwareLess(a, b); decided {
+		return less
 	}
 	if a.QuotaPressure != b.QuotaPressure {
 		return a.QuotaPressure > b.QuotaPressure
