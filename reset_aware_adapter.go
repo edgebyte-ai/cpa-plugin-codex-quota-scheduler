@@ -71,10 +71,27 @@ func resetPolicyState(a AccountState, now time.Time) resetAwareInput {
 	}
 }
 
-func applyResetAwarePolicy(accounts []AccountView, now time.Time) []AccountView {
+func nextGlobalReset(times []time.Time, now time.Time) time.Time {
+	for _, value := range normalizeGlobalResetTimes(times) {
+		if value.After(now) {
+			return value
+		}
+	}
+	return time.Time{}
+}
+
+func applyResetAwarePolicy(accounts []AccountView, snapshot SchedulerSnapshot, now time.Time) []AccountView {
 	o := resetPolicyOptions(now)
-	if !o.Enabled || len(accounts) == 0 {
+	enabled := snapshot.ResetAwareScheduling || o.Enabled
+	if !enabled || len(accounts) == 0 {
 		return accounts
+	}
+
+	policyConfig := o.PolicyConfig()
+	if snapshot.ResetAwareScheduling {
+		policyConfig.GlobalResetAt = nextGlobalReset(snapshot.GlobalResetTimes, now)
+		policyConfig.DeadlineFloor = time.Minute
+		policyConfig.ActivationDelay = 0
 	}
 
 	inputs := make([]resetpolicy.Account, len(accounts))
@@ -87,7 +104,7 @@ func applyResetAwarePolicy(accounts []AccountView, now time.Time) []AccountView 
 		inputs[i] = input
 	}
 
-	keys := resetpolicy.Keys(inputs, o.PolicyConfig(), now)
+	keys := resetpolicy.Keys(inputs, policyConfig, now)
 	for i := range accounts {
 		accounts[i].resetAwareRank = resetAwareKey{enabled: true, key: keys[i]}
 	}
