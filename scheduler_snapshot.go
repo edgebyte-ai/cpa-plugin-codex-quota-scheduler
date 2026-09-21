@@ -11,6 +11,8 @@ type SchedulerSnapshot struct {
 	HandleEnabled     bool
 	Fallback          FallbackMode
 	MonthlyMode       MonthlyMode
+	ResetAwareScheduling bool
+	GlobalResetTimes     []time.Time
 	Accounts          []AccountView
 	ActiveHighestTier map[string]struct{}
 	Trials            *TrialRegistry
@@ -37,6 +39,7 @@ func PublishSchedulerSnapshot(snapshot *SchedulerSnapshot) {
 }
 func cloneSchedulerSnapshot(s SchedulerSnapshot) SchedulerSnapshot {
 	s.Accounts = append([]AccountView(nil), s.Accounts...)
+	s.GlobalResetTimes = append([]time.Time(nil), s.GlobalResetTimes...)
 	s.ActiveHighestTier = cloneStringSet(s.ActiveHighestTier)
 	return s
 }
@@ -110,7 +113,7 @@ func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *Sch
 		activity = pump.enqueue
 		observation = pump.enqueueObservation
 	}
-	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity, Observation: observation}
+	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, ResetAwareScheduling: state.Config.ResetAwareScheduling, GlobalResetTimes: append([]time.Time(nil), state.Config.GlobalResetTimes...), Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity, Observation: observation}
 }
 
 func accountViewFromState(a AccountState, cfg Config, now time.Time, trials *TrialRegistry) AccountView {
