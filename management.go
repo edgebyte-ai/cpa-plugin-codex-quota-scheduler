@@ -578,6 +578,7 @@ func handlePutSettings(store *PluginState, req pluginapi.ManagementRequest, now 
 	}
 	resp := saveSettingsPayload(store, payload)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		publishSchedulerState(store, nil, now)
 		store.RecordLog("info", "ui.settings_saved", "页面保存调度设置", nil, now)
 	}
 	return resp
@@ -653,6 +654,7 @@ func handleImportState(store *PluginState, body []byte, now time.Time) pluginapi
 	store.ReplaceConfig(state.Config)
 	currentConfig.Store(state.Config)
 	store.SetAnnotations(AnnotationState{Accounts: state.Accounts, Groups: state.Groups})
+	publishSchedulerState(store, nil, now)
 	store.RecordLog("info", "ui.config_imported", "页面导入插件配置", nil, now)
 	return jsonManagementResponse(http.StatusOK, map[string]bool{"ok": true})
 }
