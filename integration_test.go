@@ -149,7 +149,7 @@ func TestHandleMethodRegisterIgnoresInvalidPersistedAnnotations(t *testing.T) {
 	}
 }
 
-func TestHandleMethodSchedulerPickFallbackEnvelope(t *testing.T) {
+func TestHandleMethodSchedulerPickUnavailableEnvelope(t *testing.T) {
 	cleanupIntegrationGlobals(t)
 
 	globalState = NewPluginState(DefaultConfig())
@@ -172,16 +172,8 @@ func TestHandleMethodSchedulerPickFallbackEnvelope(t *testing.T) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		t.Fatalf("decode envelope: %v", err)
 	}
-	if !env.OK {
-		t.Fatalf("expected ok envelope, got %+v", env)
-	}
-
-	var resp pluginapi.SchedulerPickResponse
-	if err := json.Unmarshal(env.Result, &resp); err != nil {
-		t.Fatalf("decode scheduler response: %v", err)
-	}
-	if !resp.Handled || resp.DelegateBuiltin != pluginapi.SchedulerBuiltinFillFirst {
-		t.Fatalf("expected fill-first fallback, got %+v", resp)
+	if env.OK || env.Error == nil || env.Error.HTTPStatus != 503 {
+		t.Fatalf("expected unavailable response without builtin fallback, got %+v", env)
 	}
 }
 

@@ -39,6 +39,8 @@ const (
 )
 
 type AccountView struct {
+	resetAwareInput      resetAwareInput
+	resetAwareRank       resetAwareKey
 	ID                   string
 	AuthIndex            string
 	Instance             AuthInstanceID
@@ -95,6 +97,10 @@ func SelectAccount(snapshot SchedulerSnapshot, candidates []Candidate, now time.
 }
 
 func selectAccountSkipping(snapshot SchedulerSnapshot, candidates []Candidate, now time.Time, skip map[AuthInstanceID]struct{}, trials *TrialRegistry) SelectionResult {
+	return selectAccountWithAffinity(snapshot, candidates, now, skip, trials, "")
+}
+
+func selectAccountWithAffinity(snapshot SchedulerSnapshot, candidates []Candidate, now time.Time, skip map[AuthInstanceID]struct{}, trials *TrialRegistry, preferredID string) SelectionResult {
 	eligible := make(map[string]struct{}, len(candidates))
 	for _, c := range candidates {
 		if c.ID != "" && c.Provider == "codex" {
@@ -117,11 +123,17 @@ func selectAccountSkipping(snapshot SchedulerSnapshot, candidates []Candidate, n
 		}
 		class := ClassifyAccount(a, now)
 		if class != Excluded {
+			// A healthy binding outranks every ranking input, including CPA
+			// priority and reset deadlines. Trial admission still runs at dispatch.
+			if a.ID == preferredID {
+				return SelectionResult{AuthID: a.ID, Instance: a.Instance, Class: class, Trial: class == Opportunistic, Reason: "session_affinity", Ordered: []AccountView{a}}
+			}
 			byClass[class] = append(byClass[class], a)
 		}
 	}
 	for _, class := range []AvailabilityClass{Preferred, Opportunistic} {
 		accounts := byClass[class]
+		accounts = applyResetAwarePolicy(accounts, snapshot, now)
 		sort.Slice(accounts, func(i, j int) bool { return accountViewLess(accounts[i], accounts[j], snapshot.MonthlyMode) })
 		if len(accounts) > 0 {
 			result := SelectionResult{AuthID: accounts[0].ID, Instance: accounts[0].Instance, Class: class, Trial: class == Opportunistic, Reason: "selected", Ordered: accounts}
@@ -146,6 +158,9 @@ func accountViewLess(a, b AccountView, mode MonthlyMode) bool {
 	}
 	if mode == MonthlyModePriority && a.Family != b.Family {
 		return a.Family == AccountFamilyMonthly
+	}
+	if less, decided := resetAwareLess(a, b); decided {
+		return less
 	}
 	if a.QuotaPressure != b.QuotaPressure {
 		return a.QuotaPressure > b.QuotaPressure

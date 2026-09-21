@@ -203,6 +203,7 @@ func buildOrderedAccounts(req pluginapi.SchedulerPickRequest, snapshot StateSnap
 		})
 	}
 
+	ordered = applyResetAwareScheduledPolicy(ordered, snapshot, now)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		left, right := ordered[i], ordered[j]
 		if left.selectionClass != right.selectionClass {

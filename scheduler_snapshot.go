@@ -8,16 +8,20 @@ import (
 )
 
 type SchedulerSnapshot struct {
-	HandleEnabled     bool
-	Fallback          FallbackMode
-	MonthlyMode       MonthlyMode
-	Accounts          []AccountView
-	ActiveHighestTier map[string]struct{}
-	Trials            *TrialRegistry
-	EvidenceIntents   chan<- EvidenceIntent
-	AdmissionVersion  uint64
-	Activity          func(pluginapi.SchedulerPickRequest, uint64, time.Time)
-	Observation       func(pluginapi.SchedulerPickRequest, PickDecision, time.Time)
+	HandleEnabled        bool
+	AffinityMode         string
+	AffinityTTL          time.Duration
+	Fallback             FallbackMode
+	MonthlyMode          MonthlyMode
+	ResetAwareScheduling bool
+	GlobalResetTimes     []time.Time
+	Accounts             []AccountView
+	ActiveHighestTier    map[string]struct{}
+	Trials               *TrialRegistry
+	EvidenceIntents      chan<- EvidenceIntent
+	AdmissionVersion     uint64
+	Activity             func(pluginapi.SchedulerPickRequest, uint64, time.Time)
+	Observation          func(pluginapi.SchedulerPickRequest, PickDecision, time.Time)
 }
 
 type EvidenceIntent struct {
@@ -37,6 +41,7 @@ func PublishSchedulerSnapshot(snapshot *SchedulerSnapshot) {
 }
 func cloneSchedulerSnapshot(s SchedulerSnapshot) SchedulerSnapshot {
 	s.Accounts = append([]AccountView(nil), s.Accounts...)
+	s.GlobalResetTimes = append([]time.Time(nil), s.GlobalResetTimes...)
 	s.ActiveHighestTier = cloneStringSet(s.ActiveHighestTier)
 	return s
 }
@@ -53,7 +58,7 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 	if snapshot == nil {
 		return PickDecision{Reason: "handle_disabled"}
 	}
-	if !requestIncludesCodex(req) {
+	if !requestIncludesCodex(req) || codexCandidateCount(req) == 0 {
 		return PickDecision{Reason: "provider_not_codex"}
 	}
 	if !snapshot.HandleEnabled {
@@ -62,18 +67,23 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 	if snapshot.Activity != nil {
 		snapshot.Activity(req, snapshot.AdmissionVersion, now)
 	}
+	decision := globalAffinity.pick(*snapshot, req, now)
+	return observeSchedulerDecision(snapshot, req, decision, now)
+}
+
+func pickSnapshotAccount(snapshot SchedulerSnapshot, req pluginapi.SchedulerPickRequest, now time.Time, preferredID string) (PickDecision, AuthInstanceID) {
 	candidates := make([]Candidate, 0, len(req.Candidates))
 	for _, c := range req.Candidates {
 		candidates = append(candidates, Candidate{ID: c.ID, Provider: c.Provider})
 	}
-	result := selectAccountSkipping(*snapshot, candidates, now, nil, snapshot.Trials)
+	result := selectAccountWithAffinity(snapshot, candidates, now, nil, snapshot.Trials, preferredID)
 	var skipped map[AuthInstanceID]struct{}
 	for result.AuthID != "" && result.Class == Opportunistic && (snapshot.Trials == nil || !snapshot.Trials.TryBegin(result.Instance, now)) {
 		if skipped == nil {
 			skipped = make(map[AuthInstanceID]struct{})
 		}
 		skipped[result.Instance] = struct{}{}
-		result = selectAccountSkipping(*snapshot, candidates, now, skipped, snapshot.Trials)
+		result = selectAccountWithAffinity(snapshot, candidates, now, skipped, snapshot.Trials, preferredID)
 	}
 	if result.AuthID != "" && result.Class == Opportunistic {
 		select {
@@ -83,12 +93,14 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 		}
 	}
 	if result.AuthID != "" {
-		return observeSchedulerDecision(snapshot, req, PickDecision{AuthID: result.AuthID, Handled: true, Reason: "selected"}, now)
+		reason := result.Reason
+		if preferredID != "" && result.AuthID != preferredID {
+			reason = "session_affinity_reselected"
+		}
+		return PickDecision{AuthID: result.AuthID, Handled: true, Reason: reason}, result.Instance
 	}
-	if snapshot.Fallback == FallbackFillFirst {
-		return observeSchedulerDecision(snapshot, req, PickDecision{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinFillFirst, Reason: result.Reason}, now)
-	}
-	return observeSchedulerDecision(snapshot, req, PickDecision{Reason: result.Reason}, now)
+	// Do not let builtin fallback resurrect a quota/health/trial-excluded account.
+	return PickDecision{Handled: true, Reason: "no_selectable_account"}, 0
 }
 
 func observeSchedulerDecision(snapshot *SchedulerSnapshot, req pluginapi.SchedulerPickRequest, decision PickDecision, now time.Time) PickDecision {
@@ -110,7 +122,7 @@ func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *Sch
 		activity = pump.enqueue
 		observation = pump.enqueueObservation
 	}
-	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity, Observation: observation}
+	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, AffinityMode: state.Config.AffinityMode, AffinityTTL: state.Config.AffinityTTL, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, ResetAwareScheduling: state.Config.ResetAwareScheduling, GlobalResetTimes: append([]time.Time(nil), state.Config.GlobalResetTimes...), Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity, Observation: observation}
 }
 
 func accountViewFromState(a AccountState, cfg Config, now time.Time, trials *TrialRegistry) AccountView {
@@ -135,7 +147,8 @@ func accountViewFromState(a AccountState, cfg Config, now time.Time, trials *Tri
 		circuitClass = CircuitHalfOpen
 	}
 	return AccountView{
-		ID: a.AuthID, AuthIndex: a.AuthIndex, Instance: a.Instance,
+		resetAwareInput: resetPolicyState(a, now),
+		ID:              a.AuthID, AuthIndex: a.AuthIndex, Instance: a.Instance,
 		PluginPriority: a.Annotation.SchedulerPriority, CPAPriority: a.Priority, Family: a.Family,
 		Cache: cache, LastKnownAvailable: a.LastError == "", Exhausted: exhausted,
 		ResetAt: reset, AuthBlocked: a.Refresh.AuthFailure, Circuit: circuitClass,

@@ -1,0 +1,242 @@
+package pluginhost
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"gopkg.in/yaml.v3"
+)
+
+type quotaAffinityCompatTransport struct{}
+
+func (quotaAffinityCompatTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "chatgpt.com" {
+		return nil, fmt.Errorf("unexpected external request: %s", r.URL.Host)
+	}
+	body := `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":20,"limit_window_seconds":604800,"reset_after_seconds":86400}}}`
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+}
+
+type quotaAffinityCompatExecutor struct {
+	t        *testing.T
+	mu       sync.Mutex
+	attempts []string
+	failAuth string
+}
+
+func (*quotaAffinityCompatExecutor) Identifier() string { return "codex" }
+func (e *quotaAffinityCompatExecutor) Execute(_ context.Context, a *coreauth.Auth, r coreexecutor.Request, o coreexecutor.Options) (coreexecutor.Response, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for name := range o.Headers {
+		if strings.EqualFold(name, "X-Cpa-Quota-Affinity") && o.Headers.Get(name) != "" {
+			e.t.Error("plugin correlation token leaked into execution")
+		}
+	}
+	if !strings.Contains(string(r.Payload), `"input"`) {
+		e.t.Error("request body was replaced")
+	}
+	e.attempts = append(e.attempts, a.ID)
+	if a.ID == e.failAuth {
+		return coreexecutor.Response{}, &coreauth.Error{Code: "server_is_overloaded", HTTPStatus: 503, Message: "synthetic overload"}
+	}
+	return coreexecutor.Response{Payload: []byte(a.ID)}, nil
+}
+func (e *quotaAffinityCompatExecutor) ExecuteStream(ctx context.Context, a *coreauth.Auth, r coreexecutor.Request, o coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	response, err := e.Execute(ctx, a, r, o)
+	if err != nil {
+		return nil, err
+	}
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: response.Payload}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+func (*quotaAffinityCompatExecutor) Refresh(_ context.Context, a *coreauth.Auth) (*coreauth.Auth, error) {
+	return a, nil
+}
+func (*quotaAffinityCompatExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, nil
+}
+func (*quotaAffinityCompatExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("unexpected HTTP call")
+}
+
+func TestQuotaSchedulerStandaloneOnMain(t *testing.T) {
+	library := os.Getenv("CPA_QUOTA_PLUGIN_LIBRARY")
+	if library == "" {
+		t.Fatal("CPA_QUOTA_PLUGIN_LIBRARY is required")
+	}
+	if !strings.HasPrefix(os.Getenv("XDG_CONFIG_HOME"), os.TempDir()+"/") {
+		t.Fatal("launch with an isolated XDG_CONFIG_HOME before loading the Go shared library")
+	}
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = quotaAffinityCompatTransport{}
+	defer func() { http.DefaultTransport = oldTransport }()
+	t.Setenv("CPA_RESET_POLICY_FILE", "")
+	ctx := coreauth.WithSkipPersist(context.Background())
+	// Plain main selector: no host affinity wrapper or patched capability.
+	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	executor := &quotaAffinityCompatExecutor{t: t, failAuth: "A"}
+	manager.RegisterExecutor(executor)
+	authDir := t.TempDir()
+
+	for i, id := range []string{"A", "B"} {
+		jwtBody, _ := json.Marshal(map[string]any{"chatgpt_account_id": "account-" + id, "email": id + "@example.test"})
+		token := "e30." + base64.RawURLEncoding.EncodeToString(jwtBody) + ".sig"
+		metadata := map[string]any{"type": "codex", "email": id + "@example.test", "access_token": "synthetic-token-" + id, "id_token": token, "account_id": "account-" + id}
+		raw, _ := json.Marshal(metadata)
+		path := filepath.Join(authDir, id+".json")
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		a := &coreauth.Auth{ID: id, Provider: "codex", FileName: id + ".json", Status: coreauth.StatusActive, Metadata: metadata, Attributes: map[string]string{"path": path, "source": path, "priority": fmt.Sprint(9 - i)}}
+		if _, err := manager.Register(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "affinity-test"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+
+	}
+	pluginDir := t.TempDir()
+	rawLibrary, err := os.ReadFile(library)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "codex-quota-scheduler.so"), rawLibrary, 0700); err != nil {
+		t.Fatal(err)
+	}
+	host := New()
+	host.SetAuthManager(manager)
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte("enabled: true\nhandle_enabled: true\naffinity_mode: fill-first\naffinity_ttl: 4h\nreset_aware_scheduling: true\nschedule_across_priorities: true\nrefresh_on_startup: false\nenable_reset_probe: false\n"), &node); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	cfg := &config.Config{AuthDir: authDir, Plugins: config.PluginsConfig{Enabled: true, Dir: pluginDir, Configs: map[string]config.PluginInstanceConfig{"codex-quota-scheduler": {Enabled: &enabled, Raw: *node.Content[0]}}}}
+	// The synthetic transport never opens a network connection.
+	host.ApplyConfig(ctx, cfg)
+	defer host.ShutdownAll()
+	record := host.schedulerRecord()
+	if record == nil {
+		t.Fatal("native plugin not loaded")
+	}
+	if record.plugin.Capabilities.RequestInterceptor == nil || record.plugin.Capabilities.RequestLifecyclePlugin == nil {
+		t.Fatal("standard lifecycle hooks missing")
+	}
+	if _, err := record.plugin.Capabilities.ManagementAPI.(pluginapi.ManagementHandler).HandleManagement(ctx, pluginapi.ManagementRequest{Method: "GET", Path: "/status"}); err != nil {
+		t.Fatal(err)
+	}
+	management := record.plugin.Capabilities.ManagementAPI.(pluginapi.ManagementHandler)
+	for _, id := range []string{"A", "B"} {
+		deadline := time.NewTimer(5 * time.Second)
+		tick := time.NewTicker(10 * time.Millisecond)
+		ready := false
+		for !ready {
+			status, err := management.HandleManagement(ctx, pluginapi.ManagementRequest{Method: "GET", Path: "/status", Query: url.Values{"format": {"json"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var data struct {
+				Accounts []struct {
+					AuthID    string `json:"auth_id"`
+					Available bool   `json:"available"`
+				}
+			}
+			if err := json.Unmarshal(status.Body, &data); err != nil {
+				t.Fatal(err)
+			}
+			for _, a := range data.Accounts {
+				if a.AuthID == id && a.Available {
+					ready = true
+				}
+			}
+			if ready {
+				break
+			}
+			if _, err := management.HandleManagement(ctx, pluginapi.ManagementRequest{Method: "POST", Path: "/refresh/account", Query: url.Values{"auth_id": {id}}}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-tick.C:
+			case <-deadline.C:
+				t.Fatalf("quota not initialized for %s: %s", id, status.Body)
+			}
+		}
+		tick.Stop()
+		deadline.Stop()
+	}
+	manager.SetPluginScheduler(host)
+	api := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	api.SetPluginHost(host)
+	run := func(caller, session, input, want string, stream bool) {
+		t.Helper()
+		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ginCtx.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+		ginCtx.Set("userApiKey", caller)
+		requestCtx := context.WithValue(ctx, "gin", ginCtx)
+		body := map[string]any{"model": "affinity-test", "input": input}
+		if session != "" {
+			body["prompt_cache_key"] = session
+		}
+		raw, _ := json.Marshal(body)
+		var payload []byte
+		if stream {
+			response, err := api.ExecuteModelStream(requestCtx, handlers.ModelExecutionRequest{EntryProtocol: "openai-response", ExitProtocol: "openai-response", ForcedProvider: "codex", Model: "affinity-test", Body: raw, Stream: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for chunk := range response.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				payload = append(payload, chunk.Payload...)
+			}
+		} else {
+			response, err := api.ExecuteProtocolWithAuthManager(requestCtx, handlers.ProtocolExecutionRequest{EntryProtocol: "openai-response", ExitProtocol: "openai-response", ForcedProvider: "codex", Model: "affinity-test", Body: raw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload = response.Body
+		}
+		if string(payload) != want {
+			t.Fatalf("%s/%s got %s, want %s", caller, session, payload, want)
+		}
+	}
+	run("caller", "", "part 6", "B", false)
+	manager.MarkResult(ctx, coreauth.Result{AuthID: "A", Provider: "codex", Model: "affinity-test", Success: true})
+	executor.mu.Lock()
+	executor.failAuth = ""
+	executor.mu.Unlock()
+	run("caller", "", "different part 7", "B", true)
+	run("caller", "explicit-new", "new task", "A", false)
+	run("different-caller", "", "new scope", "A", false)
+	run("caller", "", "part 8", "B", false)
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if want := []string{"A", "B", "B", "A", "A", "B"}; !reflect.DeepEqual(executor.attempts, want) {
+		t.Fatalf("attempts = %v, want %v", executor.attempts, want)
+	}
+}

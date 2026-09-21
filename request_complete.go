@@ -20,6 +20,8 @@ func handleRequestComplete(raw []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
+	globalAffinity.complete(completion, time.Now())
+	globalStreamObservers.forget(completion.RequestID)
 	handleRequestCompletionEvent(globalState, completion, time.Now())
 	return okEnvelope(struct{}{})
 }

@@ -60,6 +60,7 @@ type RosterControllerOptions struct {
 	ProbeOnProvisional bool
 	VerifyProvisional  func(context.Context, ActiveRoster) bool
 	CommitProvisional  func(func()) bool
+	AcrossPriorities   func() bool
 }
 
 type RosterController struct {
@@ -75,6 +76,7 @@ type RosterController struct {
 	probeOnProvisional bool
 	verifyProvisional  func(context.Context, ActiveRoster) bool
 	commitProvisional  func(func()) bool
+	acrossPriorities   func() bool
 }
 
 func NewRosterController(opts RosterControllerOptions) *RosterController {
@@ -83,6 +85,7 @@ func NewRosterController(opts RosterControllerOptions) *RosterController {
 		now = time.Now
 	}
 	c := &RosterController{host: opts.Host, now: now, publish: opts.Publish, observe: opts.Observe, cancel: opts.Cancel, probeOnProvisional: opts.ProbeOnProvisional, verifyProvisional: opts.VerifyProvisional, commitProvisional: opts.CommitProvisional}
+	c.acrossPriorities = opts.AcrossPriorities
 	c.current = ActiveRoster{Capability: CapabilityB, Health: RosterWaiting}
 	if opts.Provisional != nil {
 		p := cloneActiveRoster(*opts.Provisional)
@@ -230,6 +233,13 @@ func (c *RosterController) finishSync(ctx context.Context, entries []RosterEntry
 		if !ok {
 			syncErr = errors.New("authoritative host roster has no confirmed codex tier")
 		} else {
+			if c.acrossPriorities != nil && c.acrossPriorities() {
+				ids = ids[:0]
+				for id := range schedulerRosterSet(HostRosterSnapshot{Entries: entries}, true) {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+			}
 			filtered := filterRosterEntries(entries, ids)
 			generation := old.Generation
 			if !sameRoster(old, priority, filtered, ids) {

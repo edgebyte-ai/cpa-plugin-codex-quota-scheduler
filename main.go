@@ -143,7 +143,8 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 		globalRefresher = nil
 	}
 	globalRosterController = NewRosterController(RosterControllerOptions{
-		Host: ABIHostAuthLister{},
+		Host:             ABIHostAuthLister{},
+		AcrossPriorities: func() bool { return globalState.Config().ScheduleAcrossPriorities },
 		Provisional: func() *ActiveRoster {
 			if production == nil {
 				return nil
@@ -276,6 +277,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
 	stopGlobalPickActivityPump()
+	globalAffinity.clear()
 	refresherMu.Lock()
 	refresher := globalRefresher
 	globalRefresher = nil

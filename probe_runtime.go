@@ -591,8 +591,8 @@ func (r *QuotaRefresher) recoverProbeFromRoster(bindings map[string]RuntimeBindi
 	return r.persistProbeInstances(touched)
 }
 
-func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeBinding) (map[string]RuntimeBinding, map[AuthInstanceID]struct{}) {
-	tier := highestTierSet(roster)
+func activeProbeBindings(roster HostRosterSnapshot, bindings map[string]RuntimeBinding, acrossPriorities bool) (map[string]RuntimeBinding, map[AuthInstanceID]struct{}) {
+	tier := schedulerRosterSet(roster, acrossPriorities)
 	byID := map[string]RuntimeBinding{}
 	instances := map[AuthInstanceID]struct{}{}
 	for id, b := range bindings {
@@ -694,7 +694,7 @@ func (r *QuotaRefresher) runProbeDuePass(ctx context.Context) error {
 		bindings[id] = b
 	}
 	r.bindings.mu.RUnlock()
-	bindings, activeInstances := activeProbeBindings(r.runtimeRoster(), bindings)
+	bindings, activeInstances := activeProbeBindings(r.runtimeRoster(), bindings, r.state.Config().ScheduleAcrossPriorities)
 	var firstErr error
 	if err := r.reconcileProbeOrphans(persisted, activeInstances); err != nil {
 		firstErr = err
@@ -833,7 +833,7 @@ func (r *QuotaRefresher) runProbeRecoveryOwned(ctx context.Context) (runErr erro
 		allBindings[id] = b
 	}
 	r.bindings.mu.RUnlock()
-	bindings, activeInstances := activeProbeBindings(r.runtimeRoster(), allBindings)
+	bindings, activeInstances := activeProbeBindings(r.runtimeRoster(), allBindings, r.state.Config().ScheduleAcrossPriorities)
 	persisted, err := r.runtimeStore.PersistentSnapshot()
 	if err != nil {
 		return err

@@ -245,7 +245,7 @@ func publishObservedSchedulerState() {
 	if refresher == nil {
 		return
 	}
-	publishSchedulerState(globalState, highestTierSet(refresher.runtimeRoster()), time.Now())
+	refresher.publishSchedulerStateFromRoster()
 }
 
 // applyObservedCodexHeaders consumes the X-Codex-* quota snapshot the host
