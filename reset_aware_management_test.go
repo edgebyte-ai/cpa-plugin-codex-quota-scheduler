@@ -70,9 +70,26 @@ func TestManagementUIRendersResetFields(t *testing.T) {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
 	html := string(resp.Body)
-	for _, id := range []string{`id="resetAwareScheduling"`, `id="globalResetTimes"`} {
+	for _, id := range []string{`id="resetAwareScheduling"`, `id="globalResetTimes"`, `id="addGlobalResetTime"`, `type="datetime-local"`} {
 		if !strings.Contains(html,id) {
 			t.Fatalf("missing UI field %s", id)
+		}
+	}
+}
+
+
+func TestManagementUIConvertsLocalResetTimeToISO(t *testing.T) {
+	store := NewPluginState(DefaultConfig())
+	resp := HandleManagementRequest(store, pluginapi.ManagementRequest{Method:http.MethodGet, Path:"/status"}, time.Now())
+	html := string(resp.Body)
+	for _, snippet := range []string{
+		"function globalResetISO(value)",
+		"date.toISOString()",
+		"Intl.DateTimeFormat().resolvedOptions().timeZone",
+		"function collectGlobalResetTimes()",
+	} {
+		if !strings.Contains(html, snippet) {
+			t.Fatalf("missing local-time conversion logic %q", snippet)
 		}
 	}
 }
