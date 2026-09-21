@@ -124,7 +124,7 @@ func selectAccountSkipping(snapshot SchedulerSnapshot, candidates []Candidate, n
 	}
 	for _, class := range []AvailabilityClass{Preferred, Opportunistic} {
 		accounts := byClass[class]
-		accounts = applyResetAwarePolicy(accounts, now)
+		accounts = applyResetAwarePolicy(accounts, snapshot, now)
 		sort.Slice(accounts, func(i, j int) bool { return accountViewLess(accounts[i], accounts[j], snapshot.MonthlyMode) })
 		if len(accounts) > 0 {
 			result := SelectionResult{AuthID: accounts[0].ID, Instance: accounts[0].Instance, Class: class, Trial: class == Opportunistic, Reason: "selected", Ordered: accounts}
