@@ -49,11 +49,6 @@ func TestSettingsRejectTooManyGlobalResets(t *testing.T) {
 func TestSettingsSavePublishesResetPolicyWithoutRestart(t *testing.T) {
 	now := time.Date(2026,9,20,12,0,0,0,time.UTC)
 	store := NewPluginState(DefaultConfig())
-	store.ReplaceCPAAdmission(CPAAdmissionState{Observed:true, AuthIDs:map[string]struct{}{"A":{},"B":{}}})
-	zero := 0.0
-	store.UpsertAccount(AccountState{AuthID:"A", Provider:"codex", Family:AccountFamilyWeekly, LastSuccessAt:now, Quota:ParsedQuota{LongWindow:&QuotaWindow{UsedPercent:&zero,ResetAt:now.Add(7*24*time.Hour)}}})
-	store.UpsertAccount(AccountState{AuthID:"B", Provider:"codex", Family:AccountFamilyWeekly, LastSuccessAt:now, Quota:ParsedQuota{LongWindow:&QuotaWindow{UsedPercent:&zero,ResetAt:now.Add(24*time.Hour)}}})
-
 	payload := SettingsFromConfig(DefaultConfig())
 	payload.ResetAwareScheduling = true
 	payload.GlobalResetTimes = []time.Time{now.Add(2*time.Hour)}
