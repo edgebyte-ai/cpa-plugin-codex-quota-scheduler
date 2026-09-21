@@ -240,10 +240,8 @@ func TestQuotaLimitFeedbackRepublishesExhaustionWithoutRosterMutation(t *testing
 	}
 	var secondEnv envelope
 	_ = json.Unmarshal(secondRaw, &secondEnv)
-	var second pluginapi.SchedulerPickResponse
-	_ = json.Unmarshal(secondEnv.Result, &second)
-	if second.AuthID != "" || !second.Handled || second.DelegateBuiltin != pluginapi.SchedulerBuiltinFillFirst {
-		t.Fatalf("limited account retrialed: %#v", second)
+	if secondEnv.OK || secondEnv.Error == nil || secondEnv.Error.HTTPStatus != 503 {
+		t.Fatalf("limited account retrialed: %#v", secondEnv)
 	}
 	if globalTrials.State(61, now) != TrialNone {
 		t.Fatal("excluded quota-limit account started a new trial")

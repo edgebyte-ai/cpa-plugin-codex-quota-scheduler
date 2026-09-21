@@ -9,6 +9,8 @@ import (
 
 type SchedulerSnapshot struct {
 	HandleEnabled        bool
+	AffinityMode         string
+	AffinityTTL          time.Duration
 	Fallback             FallbackMode
 	MonthlyMode          MonthlyMode
 	ResetAwareScheduling bool
@@ -29,13 +31,6 @@ type EvidenceIntent struct {
 }
 
 var publishedSchedulerSnapshot atomic.Pointer[SchedulerSnapshot]
-
-// These additive metadata keys keep the C ABI compatible with CPA v7.3.8.
-// Hosts supporting scheduler_session_affinity overwrite them on every pick.
-const (
-	schedulerAffinityEnabledKey = "scheduler_session_affinity"
-	schedulerAffinityAuthIDKey  = "scheduler_affinity_auth_id"
-)
 
 func PublishSchedulerSnapshot(snapshot *SchedulerSnapshot) {
 	if snapshot == nil {
@@ -63,7 +58,7 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 	if snapshot == nil {
 		return PickDecision{Reason: "handle_disabled"}
 	}
-	if !requestIncludesCodex(req) {
+	if !requestIncludesCodex(req) || codexCandidateCount(req) == 0 {
 		return PickDecision{Reason: "provider_not_codex"}
 	}
 	if !snapshot.HandleEnabled {
@@ -72,23 +67,23 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 	if snapshot.Activity != nil {
 		snapshot.Activity(req, snapshot.AdmissionVersion, now)
 	}
+	decision := globalAffinity.pick(*snapshot, req, now)
+	return observeSchedulerDecision(snapshot, req, decision, now)
+}
+
+func pickSnapshotAccount(snapshot SchedulerSnapshot, req pluginapi.SchedulerPickRequest, now time.Time, preferredID string) (PickDecision, AuthInstanceID) {
 	candidates := make([]Candidate, 0, len(req.Candidates))
 	for _, c := range req.Candidates {
 		candidates = append(candidates, Candidate{ID: c.ID, Provider: c.Provider})
 	}
-	affinity, _ := req.Options.Metadata[schedulerAffinityEnabledKey].(bool)
-	preferredID := ""
-	if affinity {
-		preferredID, _ = req.Options.Metadata[schedulerAffinityAuthIDKey].(string)
-	}
-	result := selectAccountWithAffinity(*snapshot, candidates, now, nil, snapshot.Trials, preferredID)
+	result := selectAccountWithAffinity(snapshot, candidates, now, nil, snapshot.Trials, preferredID)
 	var skipped map[AuthInstanceID]struct{}
 	for result.AuthID != "" && result.Class == Opportunistic && (snapshot.Trials == nil || !snapshot.Trials.TryBegin(result.Instance, now)) {
 		if skipped == nil {
 			skipped = make(map[AuthInstanceID]struct{})
 		}
 		skipped[result.Instance] = struct{}{}
-		result = selectAccountWithAffinity(*snapshot, candidates, now, skipped, snapshot.Trials, preferredID)
+		result = selectAccountWithAffinity(snapshot, candidates, now, skipped, snapshot.Trials, preferredID)
 	}
 	if result.AuthID != "" && result.Class == Opportunistic {
 		select {
@@ -102,17 +97,10 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 		if preferredID != "" && result.AuthID != preferredID {
 			reason = "session_affinity_reselected"
 		}
-		return observeSchedulerDecision(snapshot, req, PickDecision{AuthID: result.AuthID, Handled: true, Reason: reason}, now)
+		return PickDecision{AuthID: result.AuthID, Handled: true, Reason: reason}, result.Instance
 	}
-	if affinity {
-		// A builtin fallback must not resurrect accounts rejected for quota,
-		// health or trial admission. The ABI returns an explicit 503 below.
-		return observeSchedulerDecision(snapshot, req, PickDecision{Handled: true, Reason: "no_selectable_account"}, now)
-	}
-	if snapshot.Fallback == FallbackFillFirst {
-		return observeSchedulerDecision(snapshot, req, PickDecision{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinFillFirst, Reason: result.Reason}, now)
-	}
-	return observeSchedulerDecision(snapshot, req, PickDecision{Reason: result.Reason}, now)
+	// Do not let builtin fallback resurrect a quota/health/trial-excluded account.
+	return PickDecision{Handled: true, Reason: "no_selectable_account"}, 0
 }
 
 func observeSchedulerDecision(snapshot *SchedulerSnapshot, req pluginapi.SchedulerPickRequest, decision PickDecision, now time.Time) PickDecision {
@@ -134,7 +122,7 @@ func schedulerSnapshotFromState(state StateSnapshot, trials *TrialRegistry) *Sch
 		activity = pump.enqueue
 		observation = pump.enqueueObservation
 	}
-	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, ResetAwareScheduling: state.Config.ResetAwareScheduling, GlobalResetTimes: append([]time.Time(nil), state.Config.GlobalResetTimes...), Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity, Observation: observation}
+	return &SchedulerSnapshot{HandleEnabled: state.Config.HandleEnabled, AffinityMode: state.Config.AffinityMode, AffinityTTL: state.Config.AffinityTTL, Fallback: state.Config.Fallback, MonthlyMode: state.Config.MonthlyMode, ResetAwareScheduling: state.Config.ResetAwareScheduling, GlobalResetTimes: append([]time.Time(nil), state.Config.GlobalResetTimes...), Accounts: accounts, ActiveHighestTier: active, Trials: trials, EvidenceIntents: globalEvidenceIntents, Activity: activity, Observation: observation}
 }
 
 func accountViewFromState(a AccountState, cfg Config, now time.Time, trials *TrialRegistry) AccountView {

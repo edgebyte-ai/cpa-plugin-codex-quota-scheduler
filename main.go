@@ -277,6 +277,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
 	stopGlobalPickActivityPump()
+	globalAffinity.clear()
 	refresherMu.Lock()
 	refresher := globalRefresher
 	globalRefresher = nil

@@ -31,6 +31,8 @@ type FallbackMode string
 
 type Config struct {
 	HandleEnabled        bool
+	AffinityMode         string        `json:"affinity_mode,omitempty"`
+	AffinityTTL          time.Duration `json:"affinity_ttl,omitempty"`
 	QuotaRefreshInterval time.Duration
 	// StaleAfter classifies cache age and permits pick-time recovery. It does
 	// not own a normal-refresh deadline.
@@ -100,7 +102,7 @@ type registrationCapabilities struct {
 	QuotaProvider             bool `json:"quota_provider,omitempty"`
 	StreamChunkInterceptor    bool `json:"response_stream_interceptor,omitempty"`
 	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities,omitempty"`
-	SchedulerSessionAffinity  bool `json:"scheduler_session_affinity,omitempty"`
+	RequestInterceptor        bool `json:"request_interceptor,omitempty"`
 
 	// The retry chain is implemented as a model router plus a plugin executor.
 	// The router claims only models that have a configured chain, and the
@@ -114,6 +116,8 @@ type registrationCapabilities struct {
 }
 
 type rawConfig struct {
+	AffinityMode                    string `yaml:"affinity_mode"`
+	AffinityTTL                     string `yaml:"affinity_ttl"`
 	HandleEnabled                   *bool  `yaml:"handle_enabled"`
 	QuotaRefreshInterval            string `yaml:"quota_refresh_interval"`
 	StaleAfter                      string `yaml:"stale_after"`
@@ -153,6 +157,8 @@ type rawConfig struct {
 func DefaultConfig() Config {
 	return Config{
 		HandleEnabled:                   true,
+		AffinityMode:                    "fill-first",
+		AffinityTTL:                     4 * time.Hour,
 		QuotaRefreshInterval:            30 * time.Minute,
 		StaleAfter:                      5 * time.Hour,
 		MonthlyMode:                     MonthlyModeExpiryOrder,
@@ -190,6 +196,12 @@ func DefaultConfig() Config {
 
 func NormalizeConfig(cfg Config) Config {
 	defaults := DefaultConfig()
+	if cfg.AffinityMode != "off" {
+		cfg.AffinityMode = defaults.AffinityMode
+	}
+	if cfg.AffinityTTL <= 0 {
+		cfg.AffinityTTL = defaults.AffinityTTL
+	}
 	if cfg.QuotaRefreshInterval <= 0 {
 		cfg.QuotaRefreshInterval = defaults.QuotaRefreshInterval
 	}
@@ -288,6 +300,9 @@ func DecodeConfig(raw []byte) (Config, error) {
 	}
 	if decoded.HandleEnabled != nil {
 		cfg.HandleEnabled = *decoded.HandleEnabled
+	}
+	if err := applyAffinityConfig(&cfg, decoded.AffinityMode, decoded.AffinityTTL); err != nil {
+		return Config{}, err
 	}
 	if decoded.QuotaRefreshInterval != "" {
 		d, err := time.ParseDuration(decoded.QuotaRefreshInterval)
@@ -594,7 +609,7 @@ func PluginRegistration() registration {
 			QuotaProvider:             true,
 			StreamChunkInterceptor:    true,
 			SchedulerAcrossPriorities: true,
-			SchedulerSessionAffinity:  true,
+			RequestInterceptor:        true,
 
 			ModelRouter:           true,
 			Executor:              true,

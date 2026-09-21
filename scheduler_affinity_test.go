@@ -2,97 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
-
-func affinityPickRequest(preferred string) pluginapi.SchedulerPickRequest {
-	return pluginapi.SchedulerPickRequest{Provider: "codex", Options: pluginapi.SchedulerOptions{Metadata: map[string]any{
-		schedulerAffinityEnabledKey: true, schedulerAffinityAuthIDKey: preferred,
-	}}, Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "A", Provider: "codex"}, {ID: "B", Provider: "codex"}}}
-}
-
-func TestSchedulerAffinityOverridesResetRanking(t *testing.T) {
-	previous := publishedSchedulerSnapshot.Load()
-	t.Cleanup(func() { publishedSchedulerSnapshot.Store(previous) })
-	enableResetPolicyForTest(t)
-	now, s, _ := resetPolicyFixture(t)
-	s.HandleEnabled = true
-	PublishSchedulerSnapshot(&s)
-	if got := schedulerPickPublished(affinityPickRequest(""), now); got.AuthID != "A" {
-		t.Fatalf("new binding = %+v", got)
-	}
-	if got := schedulerPickPublished(affinityPickRequest("B"), now); got.AuthID != "B" || got.Reason != "session_affinity" {
-		t.Fatalf("bound account = %+v", got)
-	}
-	s.Accounts[0].CPAPriority = 99
-	s.Accounts[0].PluginPriority = 99
-	PublishSchedulerSnapshot(&s)
-	if got := schedulerPickPublished(affinityPickRequest("B"), now); got.AuthID != "B" {
-		t.Fatalf("priority preempted binding: %+v", got)
-	}
-	for _, block := range []string{"five-hour", "auth", "circuit", "temporary", "trial", "roster", "candidate"} {
-		t.Run(block, func(t *testing.T) {
-			snapshot := cloneSchedulerSnapshot(s)
-			req := affinityPickRequest("B")
-			switch block {
-			case "five-hour":
-				snapshot.Accounts[1].Exhausted = true
-				snapshot.Accounts[1].ResetAt = now.Add(time.Hour)
-			case "auth":
-				snapshot.Accounts[1].AuthBlocked = true
-			case "circuit":
-				snapshot.Accounts[1].Circuit = CircuitOpen
-			case "temporary":
-				snapshot.Accounts[1].TemporaryUnavailable = true
-			case "trial":
-				snapshot.Accounts[1].Trial = TrialActive
-			case "roster":
-				delete(snapshot.ActiveHighestTier, "B")
-			case "candidate":
-				req.Candidates = req.Candidates[:1]
-			}
-			PublishSchedulerSnapshot(&snapshot)
-			got := schedulerPickPublished(req, now)
-			if got.AuthID != "A" || got.Reason != "session_affinity_reselected" {
-				t.Fatalf("unavailable binding reused: %+v", got)
-			}
-		})
-	}
-}
-
-func TestSchedulerAffinityABIUnavailableDoesNotDelegate(t *testing.T) {
-	previous := publishedSchedulerSnapshot.Load()
-	t.Cleanup(func() { publishedSchedulerSnapshot.Store(previous) })
-	PublishSchedulerSnapshot(&SchedulerSnapshot{HandleEnabled: true, Fallback: FallbackFillFirst,
-		Accounts: []AccountView{{ID: "A", Cache: CacheFresh, AuthBlocked: true}}, ActiveHighestTier: map[string]struct{}{"A": {}},
-	})
-	raw, _ := json.Marshal(affinityPickRequest("A"))
-	encoded, err := handleSchedulerPick(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env envelope
-	if err := json.Unmarshal(encoded, &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.OK || env.Error == nil || env.Error.HTTPStatus != 503 || env.Error.Code != "auth_unavailable" {
-		t.Fatalf("unexpected response: %s", encoded)
-	}
-	// Older hosts retain their documented fallback contract.
-	req := affinityPickRequest("A")
-	req.Options.Metadata = nil
-	if got := schedulerPickPublished(req, time.Now()); got.DelegateBuiltin != pluginapi.SchedulerBuiltinFillFirst {
-		t.Fatalf("legacy fallback changed: %+v", got)
-	}
-	if !PluginRegistration().Capabilities.SchedulerSessionAffinity {
-		t.Fatal("affinity capability not registered")
-	}
-}
 
 func TestRosterControllerAndQuotaObservationKeepLowerPriorities(t *testing.T) {
 	previousSnapshot := publishedSchedulerSnapshot.Load()

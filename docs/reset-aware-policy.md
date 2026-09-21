@@ -52,38 +52,81 @@ quota observations.
 
 ## Affinity
 
-The plugin declares the additive `scheduler_session_affinity` capability. On a
-CPA host supporting that capability, CPA owns session identity, binding expiry,
-and execution-result tracking. The plugin validates the bound account against
-its quota, health, roster, and trial rules before considering any ranking.
+Account binding is owned entirely by this plugin, using CPA main's standard
+scheduler, before/after-auth interceptors, and request-completion callbacks.
+No custom CPA capability, host-affinity callback, or host patch is required.
+The build still uses the published v7.3.8 SDK with no local module replacement.
+
+```yaml
+codex-quota-scheduler:
+  enabled: true
+  handle_enabled: true
+  affinity_mode: fill-first
+  affinity_ttl: 4h
+  schedule_across_priorities: true
+  reset_aware_scheduling: true
+```
+
+`affinity_mode` defaults to `fill-first`; `off` restores ranking on every request.
+`affinity_ttl` is a positive duration, default `4h`. Both are available in
+Scheduler Settings. Existing persisted configurations acquire these defaults.
+CPA does not expose its built-in routing settings to scheduler plugins, so these
+plugin settings are independent of `routing.strategy` and
+`routing.session-affinity`. Disabling plugin takeover restores CPA's own routing.
+
+The host provides its canonical explicit identity for header/body sessions,
+prompt-cache keys, and execution sessions. Otherwise the plugin hashes caller
+scope, the normalized provider pool, and the base model into a default binding.
+Changing request content does not change that default binding. Unknown callers
+without an explicit identity are not merged. Independent tasks should supply
+independent explicit IDs. Prompt bodies and upstream conversation IDs are never
+rewritten, and no credentials or raw session identities are stored in the cache.
 
 A usable binding wins over CPA priority, account `scheduler_priority`, quota
-pressure, and reset-aware scores. Ranking runs for a new binding, an expired
-binding, or a bound account that is no longer eligible. If A fails and B succeeds,
-later requests continue on B even when A recovers. If every candidate is excluded,
-the plugin returns HTTP 503 rather than delegating to a builtin selector that
-could select an excluded account.
+pressure, and reset-aware scores. Ranking runs for new or expired bindings and
+when the bound account fails host candidate checks or plugin quota, health,
+roster-instance, or trial checks. A failed A followed by a successful B stays on B
+when A recovers. The host's retry candidate exclusions still apply. No eligible
+account returns HTTP 503; builtin fallback cannot select an excluded account.
+After a cold start, roster and quota discovery may need to finish before an
+account becomes eligible.
 
-With CPA's fill-first strategy, requests without an explicit session use CPA's
-caller/API-key, provider-pool, and normalized-model default binding. Explicit
-session IDs remain authoritative. The default binding is routing-only and does
-not change the upstream conversation or prompt-cache identity. Distinct jobs
-requiring independent allocations should supply distinct session IDs.
+Selection and binding updates are serialized in the plugin. Every selection
+gets a generation, so a late failure or success cannot remove or restore a newer
+binding, including an A-to-B-to-A transition. Standard request-completion events
+refresh successful bindings and remove matching credential-failure bindings;
+cancellation, rejection, and request-scoped errors preserve them. A temporary
+random header correlates standard before-auth and scheduler calls, and the
+after-auth interceptor clears its value before execution. Main retains an empty
+header marker internally; its Codex executor does not forward that marker. The cache is
+bounded and in-memory; configuration changes preserve bindings, while plugin
+unload or process restart clears them. Direct SDK scheduler calls without request
+hooks still reuse bindings and enforce candidate availability, but cannot receive
+per-request completion updates.
 
-The Account Queue previews new allocations and failover; it is not a global
-prediction for requests already bound to an account. The available-only filter
-does not alter scheduling. Logs distinguish `session_affinity` reuse from
-`session_affinity_reselected` failover. Stream full buffering and credential
-retry remain owned by CPA.
+The Account Queue previews new allocations and failover. Existing bindings can
+continue using an account farther down the queue. Logs distinguish
+`session_affinity` from `session_affinity_reselected`. The available-only filter
+does not alter scheduling. The Home dispatch path remains managed by Home.
 
-This requires `routing.session-affinity: true` and the matching CPA change on
-`codex/codex-quota-probe`. Update both
-CPA and the plugin; rebuilding only the plugin on an older host does not enable
-binding integration. Older hosts ignore the capability and retain legacy
-scheduling. The Home dispatch path remains managed by Home.
+## Main compatibility and stream behavior
 
-The wire contract uses `SchedulerOptions.Metadata`: the host overwrites
-`scheduler_session_affinity` (boolean) and `scheduler_affinity_auth_id` (string,
-empty on a miss) on each pick. The preferred ID must also be in `Candidates`.
-This keeps the plugin build compatible with the v7.3.8 SDK without a local
-absolute-path module replacement.
+The native plugin integration test uses unmodified official CPA main
+`ffe6ad3c` and exercises real scheduler/interceptor ABI calls, main's session
+normalization, non-streaming and streaming request handlers, cross-priority
+failover, caller isolation, and clearing of the private correlation token:
+
+```bash
+bash scripts/test-main-affinity.sh /path/to/CPA-main
+```
+
+The script uses a Go test overlay, synthetic credentials, an HTTP transport that
+never opens a connection, and a state directory isolated before process startup.
+It does not edit CPA source or touch a running service.
+
+Official main at that commit does **not** implement the quota branch's
+`codex.stream-full-buffering`. That setting has no effect on main. This account
+binding change does not add full-response buffering or replay already-delivered
+output. Main retains its own stream commitment and retry rules; bootstrap
+buffering is not equivalent to full-response buffering. Migrating the latter
+requires a separate plugin execution/buffering change.

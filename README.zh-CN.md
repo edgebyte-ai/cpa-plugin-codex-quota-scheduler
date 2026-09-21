@@ -58,12 +58,13 @@
 
 ## 调度逻辑
 
-配合支持会话绑定集成的 CPA，并开启 `routing.session-affinity: true` 后，CPA
-会先查询已有账号绑定；插件确认账号仍可用就继续使用，不因优先级或 reset-aware
-排名变化换号。下列排序规则用于新建绑定和不可用后的重新选择。使用
-`routing.strategy: fill-first` 时，没有显式 session ID 的请求按调用方/API key、
-服务商池和规范化模型共享默认路由绑定。需要同时更新 CPA 与插件；具体兼容性和
-重试规则见 [reset-aware 策略](docs/reset-aware-policy.md#affinity)。
+插件通过 CPA main 的标准接口自行维护账号绑定，无需修改 CPA。默认开启
+`affinity_mode: fill-first`，账号可用时继续使用，不因优先级或 reset-aware
+排名变化换号。下列排序规则用于新建绑定和不可用后的重新选择。没有显式
+session ID 的请求按调用方/API key、服务商池和规范化模型共享默认绑定。
+插件的 `affinity_ttl` 默认 `4h`，管理页可修改；这两个设置独立于 CPA 内置的
+`routing.strategy` 和 `routing.session-affinity`。具体兼容性和重试边界见
+[reset-aware 策略](docs/reset-aware-policy.md#affinity)。
 
 调度器依次执行四层判断。每一层都会筛选或排序账号，再把结果交给下一层。
 

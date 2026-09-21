@@ -78,12 +78,13 @@ order alone.
 
 ## How Scheduling Works
 
-With the matching CPA affinity integration and `routing.session-affinity: true`,
-the host first looks up the session's bound account. The plugin reuses it while
-it passes availability checks, even when priorities or reset-aware rankings
-change. The layers below choose accounts for new bindings and failover. With
-`routing.strategy: fill-first`, requests without explicit session IDs share a
-caller/API-key + provider-pool + normalized-model routing binding. See
+The plugin owns account bindings using the standard CPA main plugin interfaces.
+No CPA patch is needed. With `affinity_mode: fill-first` (default), a usable
+binding survives priority and reset-aware ranking changes. The layers below
+choose accounts for new bindings and failover. Requests without explicit
+session IDs share a caller/API-key + provider-pool + normalized-model routing
+binding. Configure `affinity_ttl` (default `4h`) in the plugin; these settings are
+independent of CPA's built-in routing strategy and affinity settings. See
 [reset-aware policy](docs/reset-aware-policy.md#affinity) for host compatibility,
 retry behavior, and the distinction between queue order and existing bindings.
 
