@@ -118,3 +118,31 @@ func resetAwareLess(a, b AccountView) (less, decided bool) {
 	comparison := resetpolicy.Compare(a.resetAwareRank.key, b.resetAwareRank.key)
 	return comparison < 0, comparison != 0
 }
+
+
+func applyResetAwareScheduledPolicy(accounts []ScheduledAccount, snapshot StateSnapshot, now time.Time) []ScheduledAccount {
+	if len(accounts) == 0 {
+		return accounts
+	}
+	views := make([]AccountView, 0, len(accounts))
+	for i := range accounts {
+		if accounts[i].selectionClass != Excluded {
+			views = append(views, accounts[i].selectionView)
+		}
+	}
+	policySnapshot := SchedulerSnapshot{
+		ResetAwareScheduling: snapshot.Config.ResetAwareScheduling,
+		GlobalResetTimes:     append([]time.Time(nil), snapshot.Config.GlobalResetTimes...),
+	}
+	views = applyResetAwarePolicy(views, policySnapshot, now)
+	byID := make(map[string]resetAwareKey, len(views))
+	for _, view := range views {
+		byID[view.ID] = view.resetAwareRank
+	}
+	for i := range accounts {
+		if rank, ok := byID[accounts[i].AuthID]; ok {
+			accounts[i].selectionView.resetAwareRank = rank
+		}
+	}
+	return accounts
+}
