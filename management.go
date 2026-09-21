@@ -444,6 +444,9 @@ func ConfigFromSettings(base Config, payload SettingsPayload) (Config, error) {
 	cfg.EnableManagedQuotaDisable = payload.EnableManagedQuotaDisable
 	cfg.ResetAwareScheduling = payload.ResetAwareScheduling
 	cfg.GlobalResetTimes = normalizeGlobalResetTimes(payload.GlobalResetTimes)
+	if len(cfg.GlobalResetTimes) > 256 {
+		return Config{}, jsonError("global_reset_times supports at most 256 entries")
+	}
 	if payload.LifecycleEventLimit > 0 {
 		cfg.LifecycleEventLimit = payload.LifecycleEventLimit
 	}
