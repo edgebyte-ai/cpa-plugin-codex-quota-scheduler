@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +63,12 @@ type Config struct {
 	// files.
 	EnableManagedQuotaDisable bool
 	LifecycleEventLimit       int
+
+	// ResetAwareScheduling enables the deadline-aware selection addon. Known
+	// all-account reset times are persisted here so Management UI edits become
+	// effective without restarting CPA.
+	ResetAwareScheduling bool        `json:"reset_aware_scheduling,omitempty"`
+	GlobalResetTimes     []time.Time `json:"global_reset_times,omitempty"`
 
 	// Retry chain. RetryEnabled is the kill switch: when it is false every
 	// request keeps today's behavior. RetryChain is empty by default, which is
@@ -165,6 +172,7 @@ func DefaultConfig() Config {
 		ScheduleAcrossPriorities:        true,
 		EnableManagedQuotaDisable:       false,
 		LifecycleEventLimit:             50,
+		ResetAwareScheduling:           false,
 
 		RetryEnabled:        false,
 		RetryShadow:         false,
@@ -221,6 +229,7 @@ func NormalizeConfig(cfg Config) Config {
 	if cfg.LogRetention <= 0 {
 		cfg.LogRetention = defaults.LogRetention
 	}
+	cfg.GlobalResetTimes = normalizeGlobalResetTimes(cfg.GlobalResetTimes)
 	cfg.RetryChain = NormalizeRetryChain(cfg.RetryChain)
 	if cfg.RetryMaxAttempts <= 0 {
 		cfg.RetryMaxAttempts = defaults.RetryMaxAttempts
@@ -244,6 +253,26 @@ func NormalizeConfig(cfg Config) Config {
 		cfg.RetryMaxBytes = defaults.RetryMaxBytes
 	}
 	return cfg
+}
+
+func normalizeGlobalResetTimes(values []time.Time) []time.Time {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]time.Time, 0, len(values))
+	for _, value := range values {
+		if !value.IsZero() {
+			out = append(out, value)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Before(out[j]) })
+	unique := out[:0]
+	for _, value := range out {
+		if len(unique) == 0 || !value.Equal(unique[len(unique)-1]) {
+			unique = append(unique, value)
+		}
+	}
+	return unique
 }
 
 func DecodeConfig(raw []byte) (Config, error) {
