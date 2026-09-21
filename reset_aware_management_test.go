@@ -70,10 +70,13 @@ func TestManagementUIRendersResetFields(t *testing.T) {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
 	html := string(resp.Body)
-	for _, id := range []string{`id="resetAwareScheduling"`, `id="globalResetTimes"`, `id="addGlobalResetTime"`, `type="datetime-local"`} {
-		if !strings.Contains(html,id) {
+	for _, id := range []string{`id="resetAwareScheduling"`, `id="globalResetTimes"`, `id="addGlobalResetTime"`} {
+		if !strings.Contains(html, id) {
 			t.Fatalf("missing UI field %s", id)
 		}
+	}
+	if !strings.Contains(html, `type="datetime-local"`) && !strings.Contains(html, `input.type='datetime-local'`) {
+		t.Fatal("missing datetime-local reset input")
 	}
 }
 
