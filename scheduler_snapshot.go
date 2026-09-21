@@ -8,18 +8,18 @@ import (
 )
 
 type SchedulerSnapshot struct {
-	HandleEnabled     bool
-	Fallback          FallbackMode
-	MonthlyMode       MonthlyMode
+	HandleEnabled        bool
+	Fallback             FallbackMode
+	MonthlyMode          MonthlyMode
 	ResetAwareScheduling bool
 	GlobalResetTimes     []time.Time
-	Accounts          []AccountView
-	ActiveHighestTier map[string]struct{}
-	Trials            *TrialRegistry
-	EvidenceIntents   chan<- EvidenceIntent
-	AdmissionVersion  uint64
-	Activity          func(pluginapi.SchedulerPickRequest, uint64, time.Time)
-	Observation       func(pluginapi.SchedulerPickRequest, PickDecision, time.Time)
+	Accounts             []AccountView
+	ActiveHighestTier    map[string]struct{}
+	Trials               *TrialRegistry
+	EvidenceIntents      chan<- EvidenceIntent
+	AdmissionVersion     uint64
+	Activity             func(pluginapi.SchedulerPickRequest, uint64, time.Time)
+	Observation          func(pluginapi.SchedulerPickRequest, PickDecision, time.Time)
 }
 
 type EvidenceIntent struct {
@@ -29,6 +29,13 @@ type EvidenceIntent struct {
 }
 
 var publishedSchedulerSnapshot atomic.Pointer[SchedulerSnapshot]
+
+// These additive metadata keys keep the C ABI compatible with CPA v7.3.8.
+// Hosts supporting scheduler_session_affinity overwrite them on every pick.
+const (
+	schedulerAffinityEnabledKey = "scheduler_session_affinity"
+	schedulerAffinityAuthIDKey  = "scheduler_affinity_auth_id"
+)
 
 func PublishSchedulerSnapshot(snapshot *SchedulerSnapshot) {
 	if snapshot == nil {
@@ -69,14 +76,19 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 	for _, c := range req.Candidates {
 		candidates = append(candidates, Candidate{ID: c.ID, Provider: c.Provider})
 	}
-	result := selectAccountSkipping(*snapshot, candidates, now, nil, snapshot.Trials)
+	affinity, _ := req.Options.Metadata[schedulerAffinityEnabledKey].(bool)
+	preferredID := ""
+	if affinity {
+		preferredID, _ = req.Options.Metadata[schedulerAffinityAuthIDKey].(string)
+	}
+	result := selectAccountWithAffinity(*snapshot, candidates, now, nil, snapshot.Trials, preferredID)
 	var skipped map[AuthInstanceID]struct{}
 	for result.AuthID != "" && result.Class == Opportunistic && (snapshot.Trials == nil || !snapshot.Trials.TryBegin(result.Instance, now)) {
 		if skipped == nil {
 			skipped = make(map[AuthInstanceID]struct{})
 		}
 		skipped[result.Instance] = struct{}{}
-		result = selectAccountSkipping(*snapshot, candidates, now, skipped, snapshot.Trials)
+		result = selectAccountWithAffinity(*snapshot, candidates, now, skipped, snapshot.Trials, preferredID)
 	}
 	if result.AuthID != "" && result.Class == Opportunistic {
 		select {
@@ -86,7 +98,16 @@ func schedulerPickPublished(req pluginapi.SchedulerPickRequest, now time.Time) P
 		}
 	}
 	if result.AuthID != "" {
-		return observeSchedulerDecision(snapshot, req, PickDecision{AuthID: result.AuthID, Handled: true, Reason: "selected"}, now)
+		reason := result.Reason
+		if preferredID != "" && result.AuthID != preferredID {
+			reason = "session_affinity_reselected"
+		}
+		return observeSchedulerDecision(snapshot, req, PickDecision{AuthID: result.AuthID, Handled: true, Reason: reason}, now)
+	}
+	if affinity {
+		// A builtin fallback must not resurrect accounts rejected for quota,
+		// health or trial admission. The ABI returns an explicit 503 below.
+		return observeSchedulerDecision(snapshot, req, PickDecision{Handled: true, Reason: "no_selectable_account"}, now)
 	}
 	if snapshot.Fallback == FallbackFillFirst {
 		return observeSchedulerDecision(snapshot, req, PickDecision{Handled: true, DelegateBuiltin: pluginapi.SchedulerBuiltinFillFirst, Reason: result.Reason}, now)

@@ -58,6 +58,13 @@
 
 ## 调度逻辑
 
+配合支持会话绑定集成的 CPA，并开启 `routing.session-affinity: true` 后，CPA
+会先查询已有账号绑定；插件确认账号仍可用就继续使用，不因优先级或 reset-aware
+排名变化换号。下列排序规则用于新建绑定和不可用后的重新选择。使用
+`routing.strategy: fill-first` 时，没有显式 session ID 的请求按调用方/API key、
+服务商池和规范化模型共享默认路由绑定。需要同时更新 CPA 与插件；具体兼容性和
+重试规则见 [reset-aware 策略](docs/reset-aware-policy.md#affinity)。
+
 调度器依次执行四层判断。每一层都会筛选或排序账号，再把结果交给下一层。
 
 ### 1. 接管 CPA 优先级层
@@ -65,9 +72,9 @@
 - 只考虑 provider 为 `codex` 的候选账号，忽略其他 provider。
 - 没有显式 CPA 账号优先级的 Codex 账号按优先级 `0` 处理。
 - 开启 `schedule_across_priorities`（默认开启；v7.3 宿主会同时提供全部层级的
-  候选）时，插件接管所有 CPA 优先级层级的 Codex 账号。更高层级只要还有可选
-  账号就一定优先；只有更高层级全部不可用时才会选用低层级，而不是交给 CPA
-  内置 fallback。低层级账号同样会刷新额度，以便掌握其可用性。
+  候选）时，插件接管所有 CPA 优先级层级的 Codex 账号。新建绑定和换号时，
+  同一可用性类别内优先选择较高层级；可直接使用的账号先于可安全试用的账号，
+  不受层级限制。低层级账号同样会刷新额度，以便掌握其可用性。
 - 关闭 `schedule_across_priorities`，或宿主只提供最高层级候选时，插件只接管
   当前已确认的最高 CPA 优先级层，较低层仍由 CPA 自己的 fallback 逻辑处理。
 - 如果希望所有 Codex 账号一起参与调度，应为它们设置相同的 CPA 账号优先级。

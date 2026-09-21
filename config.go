@@ -100,6 +100,7 @@ type registrationCapabilities struct {
 	QuotaProvider             bool `json:"quota_provider,omitempty"`
 	StreamChunkInterceptor    bool `json:"response_stream_interceptor,omitempty"`
 	SchedulerAcrossPriorities bool `json:"scheduler_across_priorities,omitempty"`
+	SchedulerSessionAffinity  bool `json:"scheduler_session_affinity,omitempty"`
 
 	// The retry chain is implemented as a model router plus a plugin executor.
 	// The router claims only models that have a configured chain, and the
@@ -172,7 +173,7 @@ func DefaultConfig() Config {
 		ScheduleAcrossPriorities:        true,
 		EnableManagedQuotaDisable:       false,
 		LifecycleEventLimit:             50,
-		ResetAwareScheduling:           false,
+		ResetAwareScheduling:            false,
 
 		RetryEnabled:        false,
 		RetryShadow:         false,
@@ -593,6 +594,7 @@ func PluginRegistration() registration {
 			QuotaProvider:             true,
 			StreamChunkInterceptor:    true,
 			SchedulerAcrossPriorities: true,
+			SchedulerSessionAffinity:  true,
 
 			ModelRouter:           true,
 			Executor:              true,

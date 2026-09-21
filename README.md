@@ -78,6 +78,15 @@ order alone.
 
 ## How Scheduling Works
 
+With the matching CPA affinity integration and `routing.session-affinity: true`,
+the host first looks up the session's bound account. The plugin reuses it while
+it passes availability checks, even when priorities or reset-aware rankings
+change. The layers below choose accounts for new bindings and failover. With
+`routing.strategy: fill-first`, requests without explicit session IDs share a
+caller/API-key + provider-pool + normalized-model routing binding. See
+[reset-aware policy](docs/reset-aware-policy.md#affinity) for host compatibility,
+retry behavior, and the distinction between queue order and existing bindings.
+
 The scheduler applies four layers of decisions. Each layer narrows or orders the
 accounts passed to the next one.
 
@@ -88,9 +97,9 @@ accounts passed to the next one.
 - A Codex account without an explicit CPA auth priority is treated as priority `0`.
 - With `schedule_across_priorities` enabled (the default, and the mode the
   v7.3 host feeds with candidates from every tier), the plugin admits Codex
-  accounts from all CPA priority tiers. Higher tiers always win while they have
-  a selectable account; a lower tier is only reached when every higher tier is
-  unavailable, instead of delegating to CPA's built-in fallback. Lower tiers
+  accounts from all CPA priority tiers. Within the same availability class,
+  higher tiers win for new bindings and failover. Ready accounts precede
+  trial-eligible accounts regardless of tier. Lower tiers
   are also refreshed so their availability is known.
 - With `schedule_across_priorities` disabled — or on hosts that only send the
   highest tier — the plugin admits exactly the highest confirmed tier and lower

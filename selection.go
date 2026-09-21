@@ -97,6 +97,10 @@ func SelectAccount(snapshot SchedulerSnapshot, candidates []Candidate, now time.
 }
 
 func selectAccountSkipping(snapshot SchedulerSnapshot, candidates []Candidate, now time.Time, skip map[AuthInstanceID]struct{}, trials *TrialRegistry) SelectionResult {
+	return selectAccountWithAffinity(snapshot, candidates, now, skip, trials, "")
+}
+
+func selectAccountWithAffinity(snapshot SchedulerSnapshot, candidates []Candidate, now time.Time, skip map[AuthInstanceID]struct{}, trials *TrialRegistry, preferredID string) SelectionResult {
 	eligible := make(map[string]struct{}, len(candidates))
 	for _, c := range candidates {
 		if c.ID != "" && c.Provider == "codex" {
@@ -119,6 +123,11 @@ func selectAccountSkipping(snapshot SchedulerSnapshot, candidates []Candidate, n
 		}
 		class := ClassifyAccount(a, now)
 		if class != Excluded {
+			// A healthy binding outranks every ranking input, including CPA
+			// priority and reset deadlines. Trial admission still runs at dispatch.
+			if a.ID == preferredID {
+				return SelectionResult{AuthID: a.ID, Instance: a.Instance, Class: class, Trial: class == Opportunistic, Reason: "session_affinity", Ordered: []AccountView{a}}
+			}
 			byClass[class] = append(byClass[class], a)
 		}
 	}

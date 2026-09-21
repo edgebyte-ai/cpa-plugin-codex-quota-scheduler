@@ -52,8 +52,38 @@ quota observations.
 
 ## Affinity
 
-This change does not implement a second job-affinity layer. In CPA v7.3.8's
-legacy non-Home path the plugin scheduler runs before the built-in selector, so
-built-in selector affinity is not guaranteed to run first. If an upper layer
-pins jobs to credentials before the plugin is called, keep that mechanism;
-otherwise affinity is a separate concern from this ranking policy.
+The plugin declares the additive `scheduler_session_affinity` capability. On a
+CPA host supporting that capability, CPA owns session identity, binding expiry,
+and execution-result tracking. The plugin validates the bound account against
+its quota, health, roster, and trial rules before considering any ranking.
+
+A usable binding wins over CPA priority, account `scheduler_priority`, quota
+pressure, and reset-aware scores. Ranking runs for a new binding, an expired
+binding, or a bound account that is no longer eligible. If A fails and B succeeds,
+later requests continue on B even when A recovers. If every candidate is excluded,
+the plugin returns HTTP 503 rather than delegating to a builtin selector that
+could select an excluded account.
+
+With CPA's fill-first strategy, requests without an explicit session use CPA's
+caller/API-key, provider-pool, and normalized-model default binding. Explicit
+session IDs remain authoritative. The default binding is routing-only and does
+not change the upstream conversation or prompt-cache identity. Distinct jobs
+requiring independent allocations should supply distinct session IDs.
+
+The Account Queue previews new allocations and failover; it is not a global
+prediction for requests already bound to an account. The available-only filter
+does not alter scheduling. Logs distinguish `session_affinity` reuse from
+`session_affinity_reselected` failover. Stream full buffering and credential
+retry remain owned by CPA.
+
+This requires `routing.session-affinity: true` and the matching CPA change on
+`codex/codex-quota-probe`. Update both
+CPA and the plugin; rebuilding only the plugin on an older host does not enable
+binding integration. Older hosts ignore the capability and retain legacy
+scheduling. The Home dispatch path remains managed by Home.
+
+The wire contract uses `SchedulerOptions.Metadata`: the host overwrites
+`scheduler_session_affinity` (boolean) and `scheduler_affinity_auth_id` (string,
+empty on a miss) on each pick. The preferred ID must also be in `Candidates`.
+This keeps the plugin build compatible with the v7.3.8 SDK without a local
+absolute-path module replacement.

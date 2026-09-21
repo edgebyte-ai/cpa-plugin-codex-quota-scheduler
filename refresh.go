@@ -1218,7 +1218,7 @@ func (r *QuotaRefresher) reconcileTemporaryExhausted(authID string, version uint
 		}
 		if r.state.ClearAccountTemporaryExhausted(authID) {
 			r.recordAdmissionLog(authID, version, "info", "quota.temporary_recovered", "手动刷新证实额度已恢复，已清除临时耗尽标记", map[string]any{"auth_id": authID})
-			publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
+			r.publishSchedulerStateFromRoster()
 		}
 		return
 	}
@@ -1842,7 +1842,7 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 		account.LastError = ""
 		account.Refresh = AccountRefreshState{}
 		if r.state.ApplyQuotaRefreshSuccessIfAdmissionCurrent(account, version, r.now()) {
-			publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
+			r.publishSchedulerStateFromRoster()
 		}
 		return
 	}
@@ -1876,7 +1876,7 @@ func (r *QuotaRefresher) refreshAuthVersionedHeld(auth pluginapi.HostAuthFileEnt
 	account.LastSuccessAt = r.now()
 	if r.state.ApplyQuotaRefreshSuccessIfAdmissionCurrent(account, version, r.now()) {
 		globalTrials.ObserveEvidence(account.Instance, Evidence{Kind: EvidenceReliableQuotaWriteback, At: r.now()})
-		publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
+		r.publishSchedulerStateFromRoster()
 		r.recordAdmissionLog(account.AuthID, version, "info", "quota.refresh_success", "账号额度刷新成功", map[string]any{"auth_id": account.AuthID})
 	}
 }
@@ -2243,12 +2243,33 @@ func (r *QuotaRefresher) upsertRefreshFailure(account AccountState, version uint
 	merged.LastError = message
 	if r.state.ApplyQuotaRefreshFailureIfAdmissionCurrent(merged, version, kind, message, r.now()) {
 		globalTrials.ObserveRetry(merged.Instance, r.now())
-		publishSchedulerState(r.state, highestTierSet(r.runtimeRoster()), r.now())
+		r.publishSchedulerStateFromRoster()
 		r.recordAdmissionLog(merged.AuthID, version, "warn", "quota.refresh_failed", "账号额度刷新失败", map[string]any{"auth_id": merged.AuthID, "error": message})
 	}
 }
 
+func (r *QuotaRefresher) publishSchedulerStateFromRoster() {
+	publishSchedulerState(r.state, schedulerRosterSet(r.runtimeRoster(), r.state.Config().ScheduleAcrossPriorities), r.now())
+}
+
 func highestTierSet(roster HostRosterSnapshot) map[string]struct{} {
+	return schedulerRosterSet(roster, false)
+}
+
+func schedulerRosterSet(roster HostRosterSnapshot, acrossPriorities bool) map[string]struct{} {
+	if acrossPriorities {
+		tiers, ok := CodexTierGroups(roster.Entries)
+		if !ok {
+			return nil
+		}
+		out := make(map[string]struct{})
+		for _, tier := range tiers {
+			for id := range tier.AuthIDs {
+				out[id] = struct{}{}
+			}
+		}
+		return out
+	}
 	_, ids, ok := HighestCodexTier(roster.Entries)
 	if !ok {
 		return nil

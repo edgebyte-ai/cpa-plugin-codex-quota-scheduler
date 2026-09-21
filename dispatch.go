@@ -31,8 +31,9 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type lifecycleRequest struct {
@@ -143,6 +144,9 @@ func handleSchedulerPick(raw []byte) ([]byte, error) {
 		}
 	}
 	decision := schedulerPickPublished(req, time.Now())
+	if decision.Handled && decision.AuthID == "" && decision.DelegateBuiltin == "" {
+		return json.Marshal(envelope{Error: &envelopeError{Code: "auth_unavailable", Message: "no selectable Codex quota account", HTTPStatus: 503}})
+	}
 	return okEnvelope(pluginapi.SchedulerPickResponse{
 		AuthID:          decision.AuthID,
 		DelegateBuiltin: decision.DelegateBuiltin,
